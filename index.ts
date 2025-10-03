@@ -1,84 +1,43 @@
 import * as fs from "fs";
 import * as path from "path";
 import dotenv from "dotenv";
-import { extractLegalRules } from "./src/article.helper";
-import { processSingleVideo, processSingleAudio } from "./src/youtube.helpers";
-import { delay } from "./src/utils";
-import { processAudioForTranscription } from "./src/deepgram.helpers";
-
 dotenv.config();
 
-const CONFIG = {
-  VIDEO_LINKS_FILE: 'scrapedVideoLinks.json',
-  PROCESS_DELAY: 5000
-} as const;
+import { downloadVideo } from "./src/youtube.helpers";
+import { transcribeAudio } from "./src/deepgram.helpers";
 
-async function main(): Promise<void> {
+async function processVideo(videoUrl: string): Promise<void> {
   try {
-    // const scrapedVideoUrls: string[] = JSON.parse(
-    //   fs.readFileSync(CONFIG.VIDEO_LINKS_FILE, 'utf-8')
-    // );
-    const articleUrl = process.env.ARTICLE_URL;
-    if (!articleUrl) {
-      throw new Error("ARTICLE_URL is not defined in the environment variables.");
-    }
-    const { legalRules, tokenCosts } = await extractLegalRules(articleUrl);
+    console.log(`Processing video ${videoUrl}...`);
 
-    const patreonAudioDir = path.join(__dirname, 'data', 'patreonAudio');
-    const audioFiles = fs.readdirSync(patreonAudioDir)
-      .filter(file => file.endsWith('.mp3'))
-      .map(file => {
-        const filePath = file.replace('.mp3', '');
-        return path.join(patreonAudioDir, filePath);
-      });    
-    
-    if(!audioFiles.length) {
-      console.log("No audio files found in the directory.");
-      return;
-    }
+    const { audioPath, videoId } = await downloadVideo(videoUrl);
+    console.log(`Audio downloaded for ${videoId}`);
 
-    for (const [index, audioFile] of audioFiles.entries()) {
-      console.log(`Processing audio ${index + 1}/${audioFiles.length}: ${audioFile}`);
+    const transcription = await transcribeAudio(audioPath);
 
-      const success = await processSingleAudio(audioFile, legalRules);
-      console.log(success ?
-        `✅ Successfully processed: ${audioFile}` :
-        `❌ Skipping audio due to errors: ${audioFile}`
-      );
+    const outputPath = path.join(__dirname, "data", `${videoId}.json`);
+    await fs.promises.writeFile(
+      outputPath,
+      JSON.stringify(transcription, null, 2)
+    );
 
-      if (index < audioFiles.length - 1) {
-        await delay(CONFIG.PROCESS_DELAY);
-      }
-    }
-
-    // const scrapedVideoUrls = [
-    //   // "https://www.youtube.com/watch?v=wFw4TovEicE",
-    //   // "https://www.youtube.com/watch?v=p76oc2yfcX0"
-    // ]
-
-    // if (!scrapedVideoUrls.length) {
-    //   throw new Error("No video URLs found. Exiting.");
-    // }
-
-    // for (const [index, videoUrl] of scrapedVideoUrls.entries()) {
-    //   console.log(`Processing video ${index + 1}/${scrapedVideoUrls.length}: ${videoUrl}`);
-
-    //   const success = await processSingleVideo(videoUrl, legalRules);
-    //   console.log(success ?
-    //     `✅ Successfully processed: ${videoUrl}` :
-    //     `❌ Skipping video due to errors: ${videoUrl}`
-    //   );
-
-    //   if (index < scrapedVideoUrls.length - 1) {
-    //     await delay(CONFIG.PROCESS_DELAY);
-    //   }
-    // }
-
-    console.log("Token cost:", tokenCosts);
+    console.log(`Transcription completed and saved to ${outputPath}`);
   } catch (error) {
-    console.error("Error in main process:", error);
-    process.exit(1);
+    console.error(`Error processing video ${videoUrl}:`, error);
   }
 }
 
-main();
+async function main(videoUrls: string[]): Promise<void> {
+  try {
+    for (const url of videoUrls) {
+      await processVideo(url);
+    }
+    console.log("All videos processed successfully!");
+  } catch (error) {
+    console.error("Error in main process:", error);
+  }
+}
+
+const videoUrls = ["https://www.youtube.com/watch?v=nW6JEbEG7c4"];
+
+main(videoUrls);

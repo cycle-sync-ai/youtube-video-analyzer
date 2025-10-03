@@ -1,49 +1,35 @@
 import { createClient, PrerecordedSchema } from "@deepgram/sdk";
 import * as fs from "fs";
-import * as path from "path";
-import { downloadAudio } from "./youtube.helpers";
-import dotenv from "dotenv";
 
-dotenv.config();
-
-const deepgram = createClient(process.env.DEEPGRAM_API_KEY as string);
-
-interface Sentence {
-  text: string;
-  start: number;
-  end: number;
-}
-
-interface Paragraph {
-  sentences: Sentence[];
-  speaker: number;
-  num_words: number;
-  start: number;
-  end: number;
-}
+const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 
 interface TranscriptionResult {
-  transcript: string;       // The complete transcript of the audio  
-  paragraphs: Paragraph[];   // Array of paragraphs  
-  id: string;           // The ID of the video
-  audioPath: string;         // The path to the audio file
+  transcript: string;
+  start: number;
+  end: number;
+  utterances: Array<{
+    text: string;
+    start: number;
+    end: number;
+    confidence: number;
+    words: any[];
+  }>;
 }
 
-/**  
- * Function to transcribe an audio file and return a structured response.  
- * @param audioPath - The path to the audio file to be transcribed.  
- * @returns A promise that resolves to an object containing the transcript and its structured details.  
- */
-async function transcribeAudio(audioPath: string): Promise<TranscriptionResult> {
-  console.log(`Transcribing audio file: ${audioPath}`);
+export async function transcribeAudio(
+  audioPath: string
+): Promise<TranscriptionResult> {
   try {
     const audioFile = fs.readFileSync(audioPath);
+
+    console.log(`Transcribing audio file: ${audioPath}`);
+
     const transcriptionOptions: PrerecordedSchema = {
       model: "nova-2-general",
       language: "cs",
       smart_format: false,
       diarize: true,
-      paragraphs: true,
+      utterances: true,
       punctuate: true,
       multichannel: false,
     };
@@ -57,78 +43,39 @@ async function transcribeAudio(audioPath: string): Promise<TranscriptionResult> 
       throw new Error(`Deepgram transcription error: ${error}`);
     }
 
-    const channel = result.results.channels?.[0];
-    const alternative = channel?.alternatives?.[0];
+    if (!result?.results) {
+      throw new Error("No results found in the response");
+    }
 
-    const transcript = alternative?.transcript || '';
-    console.log(`Transcript: ${transcript}`);
+    const transcript =
+      result.results.channels?.[0]?.alternatives?.[0]?.transcript;
+    const utterances = result.results.utterances || [];
 
-    // Safely handle the paragraphs  
-    const paragraphs = alternative?.paragraphs?.paragraphs?.map((paragraph: any) => ({
-      start: paragraph.start,
-      end: paragraph.end,
-      num_words: paragraph.num_words,
-      speaker: paragraph.speaker,
-      sentences: paragraph.sentences.map((sentence: any) => ({
-        text: sentence.text,
-        start: sentence.start,
-        end: sentence.end,
-      })),
-    })) || [];
+    if (!transcript) {
+      throw new Error("No transcript found in the response");
+    }
+
+    // Get start time from the first utterance and end time from the last utterance
+    const start = utterances[0]?.start || 0;
+    const end = utterances[utterances.length - 1]?.end || 0;
+
+    // Format timed transcript with utterances
+    const timedTranscript = utterances.map((utterance) => ({
+      text: utterance.transcript,
+      start: utterance.start,
+      end: utterance.end,
+      confidence: utterance.confidence,
+      words: utterance.words,
+    }));
 
     return {
       transcript,
-      paragraphs,
-      id: path.basename(audioPath),
-      audioPath
+      start,
+      end,
+      utterances: timedTranscript,
     };
   } catch (error) {
     console.error("Error in transcription:", error);
-    throw error;
-  }
-}
-
-export async function processVideoForTranscription(videoUrl: string): Promise<TranscriptionResult> {
-  try {
-    console.log(`Processing video ${videoUrl}...`);
-
-    const { audioPath, id } = await downloadAudio(videoUrl);
-    console.log(`Audio downloaded for ${id}`);
-
-    const { transcript, paragraphs } = await transcribeAudio(audioPath);
-
-    // Optionally save the transcription to a file, if needed  
-    const outputPath = path.join(__dirname, "..", "data", `${id}.json`);
-    await fs.promises.writeFile(
-      outputPath,
-      JSON.stringify(transcript, null, 2)
-    );
-    console.log(`Transcription completed and saved to ${outputPath}`);
-    return { transcript, audioPath, paragraphs, id }
-  } catch (error) {
-    console.error(`Error processing video ${videoUrl}:`, error);
-    throw error;
-  }
-}
-
-export async function processAudioForTranscription(audioPath: string): Promise<TranscriptionResult> {
-  try {
-    console.log(`Processing audio ${audioPath}...`);
-    const id = path.basename(audioPath);
-    const audioFile = `${audioPath}.mp3`;
-
-    const { transcript, paragraphs } = await transcribeAudio(audioFile);
-
-    // Optionally save the transcription to a file, if needed  
-    const outputPath = path.join(__dirname, "..", "data", `${id}.json`);
-    await fs.promises.writeFile(
-      outputPath,
-      JSON.stringify(transcript, null, 2)
-    );
-    console.log(`Transcription completed and saved to ${outputPath}`);
-    return { transcript, audioPath, paragraphs, id }
-  } catch (error) {
-    console.error(`Error processing video ${audioPath}:`, error);
     throw error;
   }
 }
