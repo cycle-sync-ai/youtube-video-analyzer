@@ -1,84 +1,104 @@
-import OpenAI from "openai";  
+import OpenAI from "openai";
 
-interface Paragraph {  
-  sentences: Sentence[];  
-  speaker: number;  
-  num_words: number;  
-  start: number;  
-  end: number;  
-}  
+import { calculateTokenCosts } from "./tokenCosts.helper";
 
-interface Sentence {  
-  text: string;  
-  start: number;  
-  end: number;  
-}  
+interface Paragraph {
+  sentences: Sentence[];
+  speaker: number;
+  num_words: number;
+  start: number;
+  end: number;
+}
 
-interface AnalysisResult {  
-  transcript: string;  
-  violationCheck: "Violation"; // Restricting to only "Violation" because we only need violated sentences  
-  start: number;  
-  end: number;  
-}  
+interface Sentence {
+  text: string;
+  start: number;
+  end: number;
+}
 
-const openai = new OpenAI({  
-  apiKey: process.env.OPENAI_API_KEY,  
-});  
+interface AnalysisResult {
+  transcript: string;
+  violatedReason: string;
+  start: number;
+  end: number;
+}
+
+interface LLMResult {
+  results: AnalysisResult[];
+  analyzeTotalCost: number;
+}
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // Function to analyze transcripts in paragraphs  
-export async function analyzeTranscriptsInParagraphs(paragraphs: Paragraph[], legalRules: string[]): Promise<AnalysisResult[]> {  
-  const results: AnalysisResult[] = [];  
+export async function analyzeTranscriptsInParagraphs(paragraphs: Paragraph[], legalRules: string[]): Promise<LLMResult> {
+  let analyzeTotalCost = 0;
+  const results: AnalysisResult[] = [];
 
   for (const paragraph of paragraphs) {  
     const { sentences } = paragraph;  
-
+  
     if (sentences.length === 0) continue; // Skip if no sentences  
-
+  
     for (const sentence of sentences) {  
       const { text } = sentence;  
-
+  
       // Create a focused prompt  
-      const prompt = `  
-      You are a legal assistant specialized in Czech law. Please review the following YouTube video transcript for potential legal violations based on the provided legal rules, both written in Czech.  
-      
+      const checkViolationsPrompt = `  
+      You are a legal assistant trained in Czech law. Thoroughly review the following YouTube transcript and identify any statements that may violate the legal rules extracted from the government article provided below.   
+  
       **YouTube Transcript:** "${text}"  
-      
-      **Legal Rules to Consider (also in Czech):** ${legalRules.join(", ")}  
-    
-      Respond only with "Violation" if any part of the transcript violates the specified legal rules, along with a brief explanation of why the violation occurs. Please do not provide any additional information or commentary.  
-    `;    
-
+  
+      **Legal Rules to Consider (in Czech):** ${legalRules.join(", ")}  
+  
+      If you find any violations, respond with "Violation" and explain the reason how they violate the legal rules with the beginning of "violated reason". If there are no violations, respond simply with "No Violations", additional explanation is not required"  
+      `;  
+  
       try {  
         const response = await openai.chat.completions.create({  
-          model: "gpt-4",  
+          model: "gpt-4o",  
           messages: [  
-            { role: "system", content: "You are a legal assistant." },  
-            { role: "user", content: prompt },  
+            { role: "system", content: "You are a legal assistant specializing in Czech law." },  
+            { role: "user", content: checkViolationsPrompt },  
           ],  
         });  
-
+  
         // Validate the response structure  
         if (response.choices && response.choices.length > 0) {  
           const violationCheckResponse = response.choices[0]?.message?.content?.trim() || "";  
           console.log("Violation Check Response:", violationCheckResponse);  
-
+  
           // Check if the response indicates a violation  
           if (violationCheckResponse.startsWith("Violation")) {  
+            // Extract the violated reason  
+            const violatedReasonIndex = violationCheckResponse.indexOf("violated reason");  
+            let violatedReason = "";  
+  
+            if (violatedReasonIndex !== -1) {  
+              violatedReason = violationCheckResponse.substring(violatedReasonIndex + "violated reason".length).trim();  
+            }  
+  
+            // Store the result with the violated reason  
             results.push({  
               transcript: text,  
-              violationCheck: "Violation",  // Only store violations  
-              start: paragraph.start,  
-              end: paragraph.end,  
+              violatedReason,               // Add the violated reason   
+              start: sentence.start,  
+              end: sentence.end,  
             });  
           }  
+  
+          analyzeTotalCost += calculateTokenCosts(checkViolationsPrompt, violationCheckResponse);  
         } else {  
           console.error("No choices returned in the response for sentence:", text);  
         }  
+  
       } catch (error) {  
         console.error("Error checking violation for sentence:", text, "Error:", error);  
       }  
     }  
-  }  
+  }
 
-  return results; // This will only contain violations  
+  return { results, analyzeTotalCost }; // This will only contain violations  
 }
