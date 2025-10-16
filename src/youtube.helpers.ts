@@ -1,152 +1,55 @@
-import ytdl from "@distube/ytdl-core";
 import * as fs from "fs";
 import * as path from "path";
-import ffmpeg from "fluent-ffmpeg";
-import youtubedl, { Payload } from "youtube-dl-exec";
+import youtubedl, { youtubeDl, Payload } from "youtube-dl-exec";
+import { processVideoForTranscription, processAudioForTranscription } from "./deepgram.helpers";
+import { analyzeTranscriptsInParagraphs } from "./llm";
+import { saveToGoogleSheets } from "./googleSheet.helper";
+import { timeStamp } from "console";
 
-const CHANNEL_URL = 'https://www.youtube.com/c/Ond%C5%99ejKob%C4%9Brsk%C3%BD'; // Channel videos page  
+interface FailedVideo {
+  url: string;
+  error: string;
+  timestamp: string;
+}
 
-export async function downloadVideo(
-  videoUrl: string
-): Promise<{ audioPath: string; videoId: string }> {
+const FAILED_VIDEOS_FILE = 'failed_videos.json';
+
+export async function downloadAudio(videoUrl: string): Promise<{ audioPath: string, id: string }> {
   try {
-    const videoInfo = await ytdl.getInfo(videoUrl);
-    const videoId = videoInfo.videoDetails.videoId;
+    const videoId = videoUrl.split('v=')[1].split('&')[0];
 
-    // Ensure data directory exists
-    const dataDir = path.join(__dirname, "..", "data");
+    // Prepare the data directory  
+    const dataDir = path.join(__dirname, '..', 'data');
     if (!fs.existsSync(dataDir)) {
       fs.mkdirSync(dataDir, { recursive: true });
     }
 
-    const audioPath = path.join(dataDir, `${videoId}.mp3`);
+    const finalAudioPath = path.join(dataDir, `${videoId}.mp3`);
+    console.log(`Final Audio Path: ${finalAudioPath}`);
 
-    // check if the file already exists
-    if (fs.existsSync(audioPath)) {
-      console.log(`Audio file already exists for ${videoId}`);
-      return { audioPath, videoId };
+    const proxies = JSON.parse(fs.readFileSync(path.join(__dirname, 'proxies.json'), 'utf-8'));
+    const proxyItem = proxies[Math.floor(Math.random() * proxies.length)].trim();
+    console.log(`Using proxy: ${proxyItem}`);
+
+    const subprocess = youtubeDl.exec(videoUrl, {
+      extractAudio: true,
+      audioFormat: 'mp3',
+      audioQuality: 0,
+      proxy: proxyItem,
+      cookies: "cookies.txt",
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
+      output: finalAudioPath,
+    })
+    if (subprocess.stdout) {
+      subprocess.stdout.on('data', (data) => {
+        const message = data.toString();
+        console.log(message); // Print the message to the terminal
+      });
     }
-
-    return new Promise((resolve, reject) => {
-      const stream = ytdl(videoUrl, {
-        quality: "highestaudio",
-        filter: "audioonly",
-      });
-
-      // Handle stream errors
-      stream.on("error", (error) => {
-        console.error("Stream error:", error);
-        reject(error);
-      });
-
-      // Handle progress
-      let lastPercent = 0;
-      stream.on("progress", (_, downloaded, total) => {
-        const percent = Math.floor((downloaded / total) * 100);
-        if (percent > lastPercent) {
-          lastPercent = percent;
-          console.log(`Downloading: ${percent}%`);
-        }
-      });
-
-      const writeStream = fs.createWriteStream(audioPath);
-
-      writeStream.on("error", (error) => {
-        console.error("Write stream error:", error);
-        reject(error);
-      });
-
-      stream
-        .pipe(writeStream)
-        .on("finish", () => {
-          console.log(`Successfully downloaded audio to ${audioPath}`);
-          resolve({ audioPath, videoId });
-        })
-        .on("error", (error) => {
-          console.error("Pipe error:", error);
-          reject(error);
-        });
-    });
+    await subprocess;
+    return { audioPath: finalAudioPath, id:videoId };
   } catch (error) {
-    console.error("Error in downloadVideo:", error);
-    throw error;
-  }
-}
-
-export async function downloadVideoInChunks(
-  videoUrl: string,
-  chunkDurationMinutes: number = 1
-): Promise<{ chunksDir: string; videoId: string }> {
-  try {
-    const videoInfo = await ytdl.getInfo(videoUrl);
-    const videoId = videoInfo.videoDetails.videoId;
-    const videoDurationSeconds = parseInt(videoInfo.videoDetails.lengthSeconds);
-
-    // Create directory for chunks
-    const dataDir = path.join(__dirname, "..", "data");
-    const chunksDir = path.join(dataDir, videoId);
-    if (!fs.existsSync(chunksDir)) {
-      fs.mkdirSync(chunksDir, { recursive: true });
-    }
-
-    // First download the complete audio file
-    const tempAudioPath = path.join(chunksDir, `complete.mp3`);
-
-    if (!fs.existsSync(tempAudioPath)) {
-      await new Promise((resolve, reject) => {
-        const stream = ytdl(videoUrl, {
-          quality: "highestaudio",
-          filter: "audioonly",
-        });
-
-        const writeStream = fs.createWriteStream(tempAudioPath);
-
-        stream.pipe(writeStream).on("finish", resolve).on("error", reject);
-      });
-    }
-
-    // Calculate number of chunks
-    const chunkDurationSeconds = chunkDurationMinutes * 60;
-    const numberOfChunks = Math.ceil(
-      videoDurationSeconds / chunkDurationSeconds
-    );
-
-    // Split into chunks using ffmpeg
-    const splitPromises = Array.from({ length: numberOfChunks }, (_, index) => {
-      const startTime = index * chunkDurationSeconds;
-      const chunkPath = path.join(chunksDir, `${index}.mp3`);
-
-      // Skip if chunk already exists
-      if (fs.existsSync(chunkPath)) {
-        console.log(`Chunk ${index} already exists`);
-        return Promise.resolve();
-      }
-
-      return new Promise((resolve, reject) => {
-        ffmpeg(tempAudioPath)
-          .setStartTime(startTime)
-          .setDuration(chunkDurationSeconds)
-          .output(chunkPath)
-          .on("end", () => {
-            console.log(`Chunk ${index} created successfully`);
-            resolve(null);
-          })
-          .on("error", (err) => {
-            console.error(`Error creating chunk ${index}:`, err);
-            reject(err);
-          })
-          .run();
-      });
-    });
-
-    await Promise.all(splitPromises);
-
-    // Optionally remove the complete file after splitting
-    fs.unlinkSync(tempAudioPath);
-
-    return { chunksDir, videoId };
-  } catch (error) {
-    console.error("Error in downloadVideoInChunks:", error);
+    console.error('Error in downloadAudio:', error);
     throw error;
   }
 }
@@ -204,4 +107,109 @@ export async function getVideoLinks(channelUrl: string): Promise<string[]> {
     console.error('Error fetching video links:', error);
     throw error; // Rethrow the error after logging it
   }
+}
+
+function saveFailedVideo(videoUrl: string, error: string) {
+  let failedVideos: FailedVideo[] = [];
+
+  if (fs.existsSync(FAILED_VIDEOS_FILE)) {
+    failedVideos = JSON.parse(fs.readFileSync(FAILED_VIDEOS_FILE, 'utf-8'));
+  }
+
+  failedVideos.push({
+    url: videoUrl,
+    error: error.toString(),
+    timestamp: new Date().toISOString()
+  });
+
+  fs.writeFileSync(FAILED_VIDEOS_FILE, JSON.stringify(failedVideos, null, 2));
+}
+
+export async function processSingleVideo(videoUrl: string, extractedRules: string[], maxRetries = 3): Promise<boolean> {
+  let audioFilePath: string | undefined;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const { paragraphs, id, audioPath } = await processVideoForTranscription(videoUrl);
+      audioFilePath = audioPath;
+      console.log("Processing completed for video:", id);
+
+      const { results } = await analyzeTranscriptsInParagraphs(paragraphs, extractedRules);
+      const sheetsData = results.map(result => ({
+        id,
+        transcript: result.transcript,
+        violated_reason: result.violatedReason,
+        start: result.start,
+        end: result.end,
+        video_link: videoUrl,
+        timestamp_link: `https://www.youtube.com/watch?v=${id}&t=${result.start}`,
+      }));
+
+
+      if (process.env.SHEET_NAME_YOUTUBE) {
+        await saveToGoogleSheets(sheetsData, process.env.SHEET_NAME_YOUTUBE);
+      } else {
+        console.error("SHEET_NAME_YOUTUBE is not defined in the environment variables");
+      }
+      console.log("sheetsData--->" ,sheetsData);
+
+      if (audioFilePath && fs.existsSync(audioFilePath)) {
+        fs.unlinkSync(audioFilePath);
+        console.log(`Deleted audio file: ${audioFilePath}`);
+      }
+      return true;
+    } catch (error) {
+      console.error(`Attempt ${attempt} failed for video ${videoUrl}:`, error);
+      if (attempt === maxRetries) {
+        saveFailedVideo(videoUrl, error instanceof Error ? error.message : String(error));
+        return false;
+      }
+      const delay = Math.pow(2, attempt) * 1000;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  return false;
+}
+
+export async function processSingleAudio(audioFile: string, extractedRules: string[], maxRetries = 3): Promise<boolean> {
+  let audioFilePath: string | undefined;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const { paragraphs, id, audioPath } = await processAudioForTranscription(audioFile);
+      audioFilePath = audioPath;
+      console.log("Processing completed for video:", id);
+
+      const { results } = await analyzeTranscriptsInParagraphs(paragraphs, extractedRules);
+      const sheetsData = results.map(result => ({
+        id: id,
+        transcript: result.transcript,
+        violated_reason: result.violatedReason,
+        start: result.start,
+        end: result.end,
+        video_link: `https://www.patreon.com/posts/${id}`,
+        timestamp_link: `https://www.patreon.com/posts/${id}`,
+      }));
+
+      if (process.env.SHEET_NAME_PATREON) {
+        await saveToGoogleSheets(sheetsData, process.env.SHEET_NAME_PATREON);
+      } else {
+        console.error("SHEET_NAME_PATREON is not defined in the environment variables");
+      }
+      console.log("sheetsData--->" ,sheetsData);
+
+      if (audioFilePath && fs.existsSync(audioFilePath)) {
+        fs.unlinkSync(audioFilePath);
+        console.log(`Deleted audio file: ${audioFilePath}`);
+      }
+      return true;
+    } catch (error) {
+      console.error(`Attempt ${attempt} failed for audio ${audioFile}:`, error);
+      if (attempt === maxRetries) {
+        saveFailedVideo(audioFile, error instanceof Error ? error.message : String(error));
+        return false;
+      }
+      const delay = Math.pow(2, attempt) * 1000;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  return false;
 }
